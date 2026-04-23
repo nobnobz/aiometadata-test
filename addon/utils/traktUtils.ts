@@ -436,40 +436,57 @@ async function fetchTraktHistoryItems(
 
   return await cacheWrapGlobal(cacheKey, async () => {
     try {
-      const url = `${TRAKT_BASE_URL}/sync/history?page=${page}&limit=${limit}`;
       logger.debug(`Trakt history request: page=${page}, limit=${limit}`);
 
-      const response: any = await makeRateLimitedRequest(
-        () => httpGet(url, {
-          dispatcher: traktDispatcher,
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            'trakt-api-version': '2',
-            'trakt-api-key': TRAKT_CLIENT_ID
-          }
-        }),
-        `Trakt fetchHistoryItems (page: ${page})`,
-        3,
-        accessToken
-      );
+      const fetchByType = async (type: 'movies' | 'shows') => {
+        const url = `${TRAKT_BASE_URL}/users/me/history/${type}?page=${page}&limit=${limit}`;
+        const response: any = await makeRateLimitedRequest(
+          () => httpGet(url, {
+            dispatcher: traktDispatcher,
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+              'trakt-api-version': '2',
+              'trakt-api-key': TRAKT_CLIENT_ID
+            }
+          }),
+          `Trakt fetchHistoryItems (${type}, page: ${page})`,
+          3,
+          accessToken
+        );
 
-      const paginationHeaders = response.headers || {};
-      const totalItems = paginationHeaders['x-pagination-item-count']
-        ? parseInt(paginationHeaders['x-pagination-item-count'])
-        : undefined;
-      const pageCount = paginationHeaders['x-pagination-page-count']
-        ? parseInt(paginationHeaders['x-pagination-page-count'])
-        : undefined;
-      const currentPage = paginationHeaders['x-pagination-page']
-        ? parseInt(paginationHeaders['x-pagination-page'])
-        : page;
+        const paginationHeaders = response.headers || {};
+        const totalItems = paginationHeaders['x-pagination-item-count']
+          ? parseInt(paginationHeaders['x-pagination-item-count'])
+          : undefined;
+        const pageCount = paginationHeaders['x-pagination-page-count']
+          ? parseInt(paginationHeaders['x-pagination-page-count'])
+          : undefined;
+        const currentPage = paginationHeaders['x-pagination-page']
+          ? parseInt(paginationHeaders['x-pagination-page'])
+          : page;
 
-      const normalizedItems = Array.isArray(response.data)
-        ? response.data
-            .map(normalizeTraktHistoryItem)
-            .filter((item): item is TraktListItem => Boolean(item))
-        : [];
+        const items = Array.isArray(response.data)
+          ? response.data
+              .map(normalizeTraktHistoryItem)
+              .filter((item): item is TraktListItem => Boolean(item))
+          : [];
+
+        return {
+          items,
+          totalItems,
+          pageCount,
+          currentPage,
+          hasMore: currentPage < (pageCount || 1),
+        };
+      };
+
+      const [movieHistory, showHistory] = await Promise.all([
+        fetchByType('movies'),
+        fetchByType('shows')
+      ]);
+
+      const normalizedItems = [...movieHistory.items, ...showHistory.items];
 
       const latestById = new Map<string, TraktListItem>();
       const latestWatchedAt = new Map<string, number>();
@@ -500,15 +517,22 @@ async function fetchTraktHistoryItems(
         return aTitle.localeCompare(bTitle);
       });
 
-      const hasMore = currentPage < (pageCount || 1);
+      const hasMore = movieHistory.hasMore || showHistory.hasMore || items.length > limit;
+      const slicedItems = items.slice(0, limit);
+      const totalItems = (movieHistory.totalItems || 0) + (showHistory.totalItems || 0) || undefined;
+      const totalPages = Math.max(movieHistory.pageCount || 0, showHistory.pageCount || 0) || undefined;
 
-      logger.info(`Trakt history pagination - page ${currentPage}/${pageCount || '?'}, items: ${items.length}, hasMore: ${hasMore}`);
+      logger.info(
+        `Trakt history pagination - movies page ${movieHistory.currentPage}/${movieHistory.pageCount || '?'}, ` +
+        `shows page ${showHistory.currentPage}/${showHistory.pageCount || '?'}, ` +
+        `items: ${slicedItems.length}, hasMore: ${hasMore}`
+      );
 
       return {
-        items,
+        items: slicedItems,
         totalItems,
         hasMore,
-        totalPages: pageCount
+        totalPages
       };
     } catch (err: any) {
       logger.error(`Error fetching Trakt history, page ${page}:`, err.message);
