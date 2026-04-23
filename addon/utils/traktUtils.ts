@@ -424,6 +424,99 @@ async function fetchTraktHistory(
   }
 }
 
+async function fetchTraktHistoryItems(
+  accessToken: string,
+  page: number,
+  limit: number = 20,
+  cacheTTL?: number
+): Promise<{ items: TraktListItem[], totalItems?: number, hasMore: boolean, totalPages?: number }> {
+  const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
+  const cacheKey = `trakt-api:history:${tokenHash}:${page}:${limit}`;
+  const ttl = cacheTTL !== undefined ? cacheTTL : parseInt(process.env.CATALOG_TTL || String(5 * 60), 10);
+
+  return await cacheWrapGlobal(cacheKey, async () => {
+    try {
+      const url = `${TRAKT_BASE_URL}/sync/history?page=${page}&limit=${limit}`;
+      logger.debug(`Trakt history request: page=${page}, limit=${limit}`);
+
+      const response: any = await makeRateLimitedRequest(
+        () => httpGet(url, {
+          dispatcher: traktDispatcher,
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'trakt-api-version': '2',
+            'trakt-api-key': TRAKT_CLIENT_ID
+          }
+        }),
+        `Trakt fetchHistoryItems (page: ${page})`,
+        3,
+        accessToken
+      );
+
+      const paginationHeaders = response.headers || {};
+      const totalItems = paginationHeaders['x-pagination-item-count']
+        ? parseInt(paginationHeaders['x-pagination-item-count'])
+        : undefined;
+      const pageCount = paginationHeaders['x-pagination-page-count']
+        ? parseInt(paginationHeaders['x-pagination-page-count'])
+        : undefined;
+      const currentPage = paginationHeaders['x-pagination-page']
+        ? parseInt(paginationHeaders['x-pagination-page'])
+        : page;
+
+      const normalizedItems = Array.isArray(response.data)
+        ? response.data
+            .map(normalizeTraktHistoryItem)
+            .filter((item): item is TraktListItem => Boolean(item))
+        : [];
+
+      const latestById = new Map<string, TraktListItem>();
+      const latestWatchedAt = new Map<string, number>();
+
+      for (const item of normalizedItems) {
+        const stremioId = extractTraktStremioId(item);
+        if (!stremioId) continue;
+
+        const watchedAtMs = item.watched_at ? new Date(item.watched_at).getTime() : 0;
+        const existingWatchedAt = latestWatchedAt.get(stremioId) || 0;
+
+        if (!latestById.has(stremioId) || watchedAtMs >= existingWatchedAt) {
+          latestById.set(stremioId, item);
+          latestWatchedAt.set(stremioId, watchedAtMs);
+        }
+      }
+
+      const items = Array.from(latestById.values()).sort((a, b) => {
+        const aTime = a.watched_at ? new Date(a.watched_at).getTime() : 0;
+        const bTime = b.watched_at ? new Date(b.watched_at).getTime() : 0;
+
+        if (bTime !== aTime) {
+          return bTime - aTime;
+        }
+
+        const aTitle = (a.movie?.title || a.show?.title || '').toLowerCase();
+        const bTitle = (b.movie?.title || b.show?.title || '').toLowerCase();
+        return aTitle.localeCompare(bTitle);
+      });
+
+      const hasMore = currentPage < (pageCount || 1);
+
+      logger.info(`Trakt history pagination - page ${currentPage}/${pageCount || '?'}, items: ${items.length}, hasMore: ${hasMore}`);
+
+      return {
+        items,
+        totalItems,
+        hasMore,
+        totalPages: pageCount
+      };
+    } catch (err: any) {
+      logger.error(`Error fetching Trakt history, page ${page}:`, err.message);
+      throw err;
+    }
+  }, ttl, { skipVersion: true });
+}
+
 async function fetchTraktUpdatedShows(
   accessToken: string, 
   startAt: string,
@@ -1136,6 +1229,7 @@ const TRAKT_BASE_URL = 'https://api.trakt.tv';
 interface TraktListItem {
   rank?: number;
   listed_at?: string;
+  watched_at?: string;
   type: 'movie' | 'show';
   movie?: {
     title: string;
@@ -1145,6 +1239,7 @@ interface TraktListItem {
       slug: string;
       imdb: string;
       tmdb: number;
+      tvdb?: number;
     };
   };
   show?: {
@@ -1176,6 +1271,39 @@ interface TraktListItem {
     aired?: string;
   }>;
   mostRecentAired?: string;
+}
+
+function extractTraktStremioId(item: TraktListItem): string | null {
+  const media = item.movie || item.show;
+  if (!media?.ids) return null;
+
+  if (media.ids.imdb) return media.ids.imdb;
+  if (media.ids.tmdb) return `tmdb:${media.ids.tmdb}`;
+  if (item.type === 'show' && media.ids.tvdb) return `tvdb:${media.ids.tvdb}`;
+  return null;
+}
+
+function normalizeTraktHistoryItem(raw: any): TraktListItem | null {
+  if (!raw || !raw.watched_at) return null;
+
+  if (raw.type === 'movie' && raw.movie) {
+    return {
+      type: 'movie',
+      movie: raw.movie,
+      watched_at: raw.watched_at
+    };
+  }
+
+  const show = raw.show || raw.episode?.show;
+  if (show) {
+    return {
+      type: 'show',
+      show,
+      watched_at: raw.watched_at
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -3093,6 +3221,7 @@ export async function checkinSeries(
 }
 
 export {
+  fetchTraktHistoryItems,
   fetchTraktMostFavoritedItems,
   fetchTraktTrendingItems,
   fetchTraktPopularItems,

@@ -928,6 +928,40 @@ export function TraktIntegration({ isOpen, onClose }: TraktIntegrationProps) {
     toast.success("My Recently Aired catalog removed");
   };
 
+  const handleAddHistory = () => {
+    if (!isConnected) {
+      toast.error("Please connect your Trakt account first");
+      return;
+    }
+
+    setConfig(prev => {
+      const newCatalog: CatalogConfig = {
+        id: "trakt.history",
+        type: "all",
+        name: "Watched History",
+        enabled: true,
+        showInHome: true,
+        source: "trakt",
+        cacheTTL: 300,
+      };
+
+      return {
+        ...prev,
+        catalogs: [...prev.catalogs, newCatalog],
+      };
+    });
+
+    toast.success("Watched History catalog added");
+  };
+
+  const handleRemoveHistory = () => {
+    setConfig(prev => ({
+      ...prev,
+      catalogs: prev.catalogs.filter(c => c.id !== "trakt.history"),
+    }));
+    toast.success("Watched History catalog removed");
+  };
+
   const handleAddUpNext = () => {
     if (!isConnected) {
       toast.error("Please connect your Trakt account first");
@@ -1007,6 +1041,7 @@ export function TraktIntegration({ isOpen, onClose }: TraktIntegrationProps) {
   const mostFavoritedCatalogs = config.catalogs.filter(c => c.id.startsWith("trakt.most_favorited."));
   const upNextCatalog = config.catalogs.find(c => c.id === "trakt.upnext");
   const unwatchedCatalog = config.catalogs.find(c => c.id === "trakt.unwatched");
+  const historyCatalog = config.catalogs.find(c => c.id === "trakt.history");
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-4xl w-full max-h-[90vh] overflow-y-auto">
@@ -2116,6 +2151,46 @@ export function TraktIntegration({ isOpen, onClose }: TraktIntegrationProps) {
                   )}
                   <p className="text-xs text-muted-foreground">
                     Groups by show and lists every unwatched aired episode in the videos section. Updates automatically based on your Trakt activity.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Watched History */}
+            {isConnected && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Watched History</CardTitle>
+                  <CardDescription>Your watched movies and shows from Trakt history</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={handleAddHistory}
+                      variant="outline"
+                      className="flex-1"
+                      disabled={!!historyCatalog}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      Add Watched History
+                    </Button>
+                  </div>
+                  {historyCatalog && (
+                    <div className="space-y-2 border-t pt-4">
+                      <div className="flex items-center justify-between p-3 border rounded-lg bg-muted/30">
+                        <span className="font-medium">Watched History</span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleRemoveHistory}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Shows your recent Trakt watch history in one mixed catalog with both movies and shows.
                   </p>
                 </CardContent>
               </Card>

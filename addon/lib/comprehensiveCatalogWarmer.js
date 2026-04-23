@@ -736,7 +736,7 @@ class ComprehensiveCatalogWarmer {
         try {
           const config = await database.getUserConfig(uuid);
           if (config) {
-            const enabledCatalogs = (config.catalogs || []).filter(c => c.enabled && c.id !== 'trakt.upnext' && c.id !== 'mdblist.upnext');
+            const enabledCatalogs = (config.catalogs || []).filter(c => c.enabled && c.id !== 'trakt.upnext' && c.id !== 'trakt.history' && c.id !== 'mdblist.upnext');
             userConfigs[uuid] = { config, enabledCatalogs };
             grandTotalCatalogs += enabledCatalogs.length;
             
@@ -1083,4 +1083,3 @@ module.exports = {
   forceRestartWarmup,
   stopComprehensiveWarming
 };
-

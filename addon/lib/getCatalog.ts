@@ -3,7 +3,7 @@ import { getGenreList } from "./getGenreList.js";
 import { getLanguages } from "./getLanguages.js";
 import { fetchMDBListItems, fetchMDBListItemsBySlug, parseMDBListItems, fetchMDBListBatchMediaInfo, fetchMDBListUpNext, parseMDBListUpNextItems, resolveMDBListUnifiedCatalogIdentity } from "../utils/mdbList.js";
 import { fetchStremThruCatalog, parseStremThruItems } from "../utils/stremthru.js";
-import { fetchTraktWatchlistItems, fetchTraktFavoritesItems, fetchTraktRecommendationsItems, fetchTraktListItems, fetchTraktListItemsById, parseTraktItems, fetchTraktMostFavoritedItems, fetchTraktCalendarShows, fetchTraktSearchItems, getTraktAccessToken } from "../utils/traktUtils.js";
+import { fetchTraktWatchlistItems, fetchTraktFavoritesItems, fetchTraktRecommendationsItems, fetchTraktListItems, fetchTraktListItemsById, parseTraktItems, fetchTraktMostFavoritedItems, fetchTraktCalendarShows, fetchTraktSearchItems, getTraktAccessToken, fetchTraktHistoryItems } from "../utils/traktUtils.js";
 import { fetchSimklTrendingItems, fetchSimklWatchlistItems, parseSimklItems, getSimklToken, fetchSimklCalendarItems, fetchSimklGenreItems, fetchSimklDvdReleases } from "../utils/simklUtils.js";
 import { fetchLetterboxdList, parseLetterboxdItems, getLetterboxdGenreIdByName } from "../utils/letterboxdUtils.js";
 const anilist = require('./anilist');
@@ -1660,7 +1660,38 @@ async function getTraktCatalog(
     
     let response: any;
     
-    if (catalogId === 'trakt.upnext') {
+    if (catalogId === 'trakt.history') {
+      const token = await ensureTraktAccessToken();
+      if (!token) {
+        return [];
+      }
+
+      const historyStart = Date.now();
+      logger.info('History: Starting catalog fetch');
+
+      const result = await fetchTraktHistoryItems(token, page, pageSize, catalogConfig?.cacheTTL);
+      const parseStart = Date.now();
+      const allItems = await parseTraktItems(
+        result.items,
+        'all',
+        language,
+        config,
+        includeVideos,
+        false
+      );
+      const parseTime = Date.now() - parseStart;
+      logger.info(`History: Parsed ${allItems.length} items in ${parseTime}ms`);
+
+      const totalTime = Date.now() - historyStart;
+      logger.info(`History: Total catalog fetch time: ${totalTime}ms`);
+
+      response = {
+        items: allItems,
+        hasMore: result.hasMore,
+        totalItems: result.totalItems,
+        totalPages: result.totalPages
+      };
+    } else if (catalogId === 'trakt.upnext') {
       // Trakt Up Next catalog with last_activities optimization
       // Up Next only has one page - return empty for page 2+
       if (page > 1) {
