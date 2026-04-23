@@ -431,19 +431,27 @@ async function fetchTraktHistoryItems(
   cacheTTL?: number
 ): Promise<{ items: TraktListItem[], totalItems?: number, hasMore: boolean, totalPages?: number }> {
   const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
-  const cacheKey = `trakt-api:history:${tokenHash}:${page}:${limit}`;
+  const cacheKey = `trakt-api:history:${tokenHash}:all`;
   // History should feel reasonably fresh without hammering Trakt.
   // Allow an explicit catalog override, then a dedicated env knob, then a 30 minute default.
   const ttl = cacheTTL !== undefined
     ? cacheTTL
     : parseInt(process.env.TRAKT_HISTORY_TTL || String(30 * 60), 10);
+  const rawPageSize = Math.min(
+    100,
+    Math.max(
+      limit,
+      parseInt(process.env.TRAKT_HISTORY_RAW_PAGE_SIZE || '100', 10)
+    )
+  );
+  const maxRawPages = Math.max(1, parseInt(process.env.TRAKT_HISTORY_MAX_RAW_PAGES || '5', 10));
 
   return await cacheWrapGlobal(cacheKey, async () => {
     try {
-      logger.debug(`Trakt history request: all page=${page}, limit=${limit}`);
+      logger.debug(`Trakt history request: all page=${page}, limit=${limit}, rawPageSize=${rawPageSize}, maxRawPages=${maxRawPages}`);
 
-      const fetchHistoryEndpoint = async (endpoint: 'all' | 'movies' | 'shows') => {
-        const url = `${TRAKT_BASE_URL}/users/me/history/${endpoint}?page=${page}&limit=${limit}`;
+      const fetchHistoryEndpoint = async (endpoint: 'all' | 'movies' | 'shows', rawPage: number, rawLimit: number) => {
+        const url = `${TRAKT_BASE_URL}/users/me/history/${endpoint}?page=${rawPage}&limit=${rawLimit}`;
         const response: any = await makeRateLimitedRequest(
           () => httpGet(url, {
             dispatcher: traktDispatcher,
@@ -454,7 +462,7 @@ async function fetchTraktHistoryItems(
               'trakt-api-key': TRAKT_CLIENT_ID
             }
           }),
-          `Trakt fetchHistoryItems (${endpoint}, page: ${page})`,
+          `Trakt fetchHistoryItems (${endpoint}, page: ${rawPage})`,
           3,
           accessToken
         );
@@ -486,22 +494,21 @@ async function fetchTraktHistoryItems(
         };
       };
 
-      const historyAll = await fetchHistoryEndpoint('all');
-      let normalizedItems = historyAll.items;
-      let totalItems = historyAll.totalItems;
-      let totalPages = historyAll.pageCount;
-      let hasMore = historyAll.hasMore;
+      const normalizedItems: TraktListItem[] = [];
+      let totalItems: number | undefined;
+      let totalPages: number | undefined;
+      let hasMore = false;
 
-      if (normalizedItems.length === 0 && historyAll.rawCount > 0) {
-        logger.warn(`Trakt history/all returned ${historyAll.rawCount} raw items but none normalized; falling back to movies+shows`);
-        const [movieHistory, showHistory] = await Promise.all([
-          fetchHistoryEndpoint('movies'),
-          fetchHistoryEndpoint('shows')
-        ]);
-        normalizedItems = [...movieHistory.items, ...showHistory.items];
-        totalItems = (movieHistory.totalItems || 0) + (showHistory.totalItems || 0) || undefined;
-        totalPages = Math.max(movieHistory.pageCount || 0, showHistory.pageCount || 0) || undefined;
-        hasMore = movieHistory.hasMore || showHistory.hasMore || normalizedItems.length > limit;
+      for (let rawPage = 1; rawPage <= maxRawPages; rawPage++) {
+        const historyPage = await fetchHistoryEndpoint('all', rawPage, rawPageSize);
+        normalizedItems.push(...historyPage.items);
+        totalItems = historyPage.totalItems;
+        totalPages = historyPage.pageCount;
+        hasMore = historyPage.hasMore;
+
+        if (!historyPage.hasMore) {
+          break;
+        }
       }
 
       const latestById = new Map<string, TraktListItem>();
@@ -533,18 +540,21 @@ async function fetchTraktHistoryItems(
         return aTitle.localeCompare(bTitle);
       });
 
-      const slicedItems = items.slice(0, limit);
+      const startIndex = Math.max(0, (page - 1) * limit);
+      const slicedItems = items.slice(startIndex, startIndex + limit);
+      const computedTotalPages = items.length > 0 ? Math.max(1, Math.ceil(items.length / limit)) : 0;
+      const computedHasMore = startIndex + limit < items.length;
 
       logger.info(
-        `Trakt history pagination - page ${historyAll.currentPage}/${historyAll.pageCount || '?'}, ` +
-        `items: ${slicedItems.length}, hasMore: ${hasMore}`
+        `Trakt history pagination - page ${page}/${computedTotalPages || '?'}, ` +
+        `items: ${slicedItems.length}, hasMore: ${computedHasMore}`
       );
 
       return {
         items: slicedItems,
-        totalItems,
-        hasMore,
-        totalPages
+        totalItems: items.length || totalItems,
+        hasMore: computedHasMore,
+        totalPages: computedTotalPages || totalPages
       };
     } catch (err: any) {
       logger.error(`Error fetching Trakt history, page ${page}:`, err.message);
