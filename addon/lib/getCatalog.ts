@@ -1670,23 +1670,11 @@ async function getTraktCatalog(
       logger.info('History: Starting catalog fetch');
 
       const result = await fetchTraktHistoryItems(token, page, pageSize, catalogConfig?.cacheTTL);
-      const parseStart = Date.now();
-      const allItems = await parseTraktItems(
-        result.items,
-        'all',
-        language,
-        config,
-        includeVideos,
-        false
-      );
-      const parseTime = Date.now() - parseStart;
-      logger.info(`History: Parsed ${allItems.length} items in ${parseTime}ms`);
-
       const totalTime = Date.now() - historyStart;
-      logger.info(`History: Total catalog fetch time: ${totalTime}ms`);
+      logger.info(`History: Fetched ${result.items.length} raw items in ${totalTime}ms`);
 
       response = {
-        items: allItems,
+        items: result.items,
         hasMore: result.hasMore,
         totalItems: result.totalItems,
         totalPages: result.totalPages
