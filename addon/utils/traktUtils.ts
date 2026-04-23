@@ -432,14 +432,18 @@ async function fetchTraktHistoryItems(
 ): Promise<{ items: TraktListItem[], totalItems?: number, hasMore: boolean, totalPages?: number }> {
   const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
   const cacheKey = `trakt-api:history:${tokenHash}:${page}:${limit}`;
-  const ttl = cacheTTL !== undefined ? cacheTTL : parseInt(process.env.CATALOG_TTL || String(5 * 60), 10);
+  // History should feel reasonably fresh without hammering Trakt.
+  // Allow an explicit catalog override, then a dedicated env knob, then a 30 minute default.
+  const ttl = cacheTTL !== undefined
+    ? cacheTTL
+    : parseInt(process.env.TRAKT_HISTORY_TTL || String(30 * 60), 10);
 
   return await cacheWrapGlobal(cacheKey, async () => {
     try {
-      logger.debug(`Trakt history request: page=${page}, limit=${limit}`);
+      logger.debug(`Trakt history request: all page=${page}, limit=${limit}`);
 
-      const fetchByType = async (type: 'movies' | 'shows') => {
-        const url = `${TRAKT_BASE_URL}/users/me/history/${type}?page=${page}&limit=${limit}`;
+      const fetchHistoryEndpoint = async (endpoint: 'all' | 'movies' | 'shows') => {
+        const url = `${TRAKT_BASE_URL}/users/me/history/${endpoint}?page=${page}&limit=${limit}`;
         const response: any = await makeRateLimitedRequest(
           () => httpGet(url, {
             dispatcher: traktDispatcher,
@@ -450,7 +454,7 @@ async function fetchTraktHistoryItems(
               'trakt-api-key': TRAKT_CLIENT_ID
             }
           }),
-          `Trakt fetchHistoryItems (${type}, page: ${page})`,
+          `Trakt fetchHistoryItems (${endpoint}, page: ${page})`,
           3,
           accessToken
         );
@@ -477,16 +481,28 @@ async function fetchTraktHistoryItems(
           totalItems,
           pageCount,
           currentPage,
+          rawCount: Array.isArray(response.data) ? response.data.length : 0,
           hasMore: currentPage < (pageCount || 1),
         };
       };
 
-      const [movieHistory, showHistory] = await Promise.all([
-        fetchByType('movies'),
-        fetchByType('shows')
-      ]);
+      const historyAll = await fetchHistoryEndpoint('all');
+      let normalizedItems = historyAll.items;
+      let totalItems = historyAll.totalItems;
+      let totalPages = historyAll.pageCount;
+      let hasMore = historyAll.hasMore;
 
-      const normalizedItems = [...movieHistory.items, ...showHistory.items];
+      if (normalizedItems.length === 0 && historyAll.rawCount > 0) {
+        logger.warn(`Trakt history/all returned ${historyAll.rawCount} raw items but none normalized; falling back to movies+shows`);
+        const [movieHistory, showHistory] = await Promise.all([
+          fetchHistoryEndpoint('movies'),
+          fetchHistoryEndpoint('shows')
+        ]);
+        normalizedItems = [...movieHistory.items, ...showHistory.items];
+        totalItems = (movieHistory.totalItems || 0) + (showHistory.totalItems || 0) || undefined;
+        totalPages = Math.max(movieHistory.pageCount || 0, showHistory.pageCount || 0) || undefined;
+        hasMore = movieHistory.hasMore || showHistory.hasMore || normalizedItems.length > limit;
+      }
 
       const latestById = new Map<string, TraktListItem>();
       const latestWatchedAt = new Map<string, number>();
@@ -517,14 +533,10 @@ async function fetchTraktHistoryItems(
         return aTitle.localeCompare(bTitle);
       });
 
-      const hasMore = movieHistory.hasMore || showHistory.hasMore || items.length > limit;
       const slicedItems = items.slice(0, limit);
-      const totalItems = (movieHistory.totalItems || 0) + (showHistory.totalItems || 0) || undefined;
-      const totalPages = Math.max(movieHistory.pageCount || 0, showHistory.pageCount || 0) || undefined;
 
       logger.info(
-        `Trakt history pagination - movies page ${movieHistory.currentPage}/${movieHistory.pageCount || '?'}, ` +
-        `shows page ${showHistory.currentPage}/${showHistory.pageCount || '?'}, ` +
+        `Trakt history pagination - page ${historyAll.currentPage}/${historyAll.pageCount || '?'}, ` +
         `items: ${slicedItems.length}, hasMore: ${hasMore}`
       );
 
